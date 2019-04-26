@@ -1,0 +1,173 @@
+<gel:script xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:core="jelly:core" xmlns:file="jelly:com.niku.union.gel.FileTagLibrary"
+  xmlns:gel="jelly:com.niku.union.gel.GELTagLibrary" xmlns:jxml="jelly:xml" xmlns:soap="jelly:com.niku.union.gel.SOAPTagLibrary"
+  xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:sql="jelly:sql" xmlns:util="jelly:util" xmlns:xog="http://www.niku.com/xog"
+  xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <gel:setDataSource dbId="niku"/>
+  <!-- get info -->
+  <core:set value="Java version: ${java.version}" var="logMessage"/>
+  <gel:formatDate format="dd MMM yy HH:mm:ss.SSS" stringVar="logDate"/>
+  <core:set value="${logDate} - ${logMessage}" var="logMessage"/>
+  <gel:log level="INFO">${logMessage}</gel:log>
+  <core:invokeStatic className="java.util.ResourceBundle" method="getBundle" var="xog_version">
+    <core:arg type="java.lang.String" value="xog"/>
+  </core:invokeStatic>
+  <core:set value="XOG/GEL version: ${xog_version.getString('version')}" var="logMessage"/>
+  <gel:formatDate format="dd MMM yy HH:mm:ss.SSS" stringVar="logDate"/>
+  <core:set value="${logDate} - ${logMessage}" var="logMessage"/>
+  <gel:log level="INFO">${logMessage}</gel:log>
+  <!-- invoke -->
+  <core:new className="com.niku.xog.client.XOGClientInterface" var="xogcaller"/>
+  <core:new className="com.niku.xog.client.XOGAdminClient" var="xogadminclient"/>
+  <core:invokeStatic className="com.niku.union.config.ConfigurationManager" method="getInstance" var="thisClarityConfig"/>
+  <sql:query escapeText="false" var="todayQuery">
+		select to_char(sysdate,'YYYYMMDDhh24miss') as theDate from dual
+	</sql:query>
+  <core:forEach items="${todayQuery.rows}" var="todayQueryRow">
+    <core:set var="today">${todayQueryRow.theDate}</core:set>
+  </core:forEach>
+  <!-- get session -->
+  <core:new className="com.niku.union.security.DefaultSecurityIdentifier" var="secId"/>
+  <core:invokeStatic className="com.niku.union.security.UserSessionControllerFactory" method="getInstance" var="userSessionCtrl"/>
+  <core:set value="${userSessionCtrl.init('admin', secId)}" var="secId"/>
+  <core:set value="${secId.getSessionId()}" var="thisSessionId"/>
+  <core:set value="XOG Session ID: ${thisSessionId}" var="logMessage"/>
+  <gel:formatDate format="dd MMM yy HH:mm:ss.SSS" stringVar="logDate"/>
+  <core:set value="${logDate} - ${logMessage}" var="logMessage"/>
+  <gel:log level="INFO">${logMessage}</gel:log>
+  <!--For the purpose of logging, 'down/up' flag for absense/presense of non-RM users and RMs without the two instance rights during the process execution-->
+  <gel:parameter default="no" var="update"/>
+  <sql:query escapeText="false" var="query2"><![CDATA[
+		--tasks with assignments, which are open for time entry and finish date in the future
+		WITH tasks AS(
+			SELECT DISTINCT pt.prprojectid--, ag.prtaskid, pt.prexternalid, pt.PRNAME, pt.prfinish
+			FROM PRASSIGNMENT ag
+			INNER JOIN prtask pt ON ag.prtaskid = pt.prid 
+			WHERE pt.IS_OPEN_TE = 1 OR pt.prfinish > (SELECT SYSDATE FROM DUAL)
+			GROUP BY pt.prprojectid, ag.prtaskid, pt.prexternalid, pt.PRNAME, pt.prfinish
+		)
+		--all projects with tasks with assignments that either closed for time entry or have finish date in the past
+		, projects AS (
+			SELECT inv.ID project_id, inv.CODE project_code, inv.NAME project_name
+			FROM INV_INVESTMENTS inv
+			INNER JOIN srm_projects sp ON sp.id = inv.id
+			WHERE inv.odf_object_code = 'project' AND inv.IS_OPEN_FOR_TE = 1
+			AND NOT EXISTS (SELECT t.* FROM tasks t WHERE t.prprojectid = inv.ID)
+		)
+		SELECT * FROM projects
+	]]></sql:query>
+  <core:set value="0" var="counter"/>
+  <core:set value="${query2.rowCount}" var="prjCounter"/>
+  <core:set value="${prjCounter / 10}" var="roundCount"/>
+  <core:set value="${roundCount.intValue()}" var="maxRoundInt"/>
+  <core:set value="${prjCounter - maxRoundInt * 10}" var="remainingProjects"/>
+  <core:set value="${remainingProjects * 10}" var="remainingTurns"/>
+  <core:if test="${prjCounter == 0 }">
+    <gel:log category="GEL" level="INFO">All projects that are open for time entry have tasks with assignment(s), which are either open for time entry or have finish date in the future.</gel:log>
+  </core:if>
+  <core:if test="${prjCounter > 0 }">
+    <gel:log level="INFO">${prjCounter} projects processed</gel:log>
+    <core:if test="${update == 'no'}">
+      <gel:log category="GEL" level="INFO">Projects that were open for time entry but did not have tasks with assignments, which were open for time entry or had finish date in the future, have been logged but not updated.</gel:log>
+      <!-- <gel:out>NOT updated</gel:out> -->
+      <core:forEach begin="0" end="${prjCounter - 1}" indexVar="d">
+        <gel:log level="INFO">Project Code: ${query2.rows[d].project_code}; Project Name: ${query2.rows[d].project_name}</gel:log>
+      </core:forEach>
+    </core:if>
+    <core:if test="${update == 'yes'}">
+      <gel:log category="GEL" level="INFO">Open for time entry' attribute has been disabled for all projects that were open for time entry but did not have tasks with assignments, which were open for time entry or had finish date in the future.</gel:log>
+      <core:forEach begin="0" end="${prjCounter - 1}" indexVar="d">
+        <gel:log level="INFO">Project Code: ${query2.rows[d].project_code}; Project Name: ${query2.rows[d].project_name}</gel:log>
+      </core:forEach>
+	  <!--Perform the mass update as a single batch if the number of projects to be processed is less than 10-->
+      <core:if test="${prjCounter &lt; 10}">
+        <gel:parse var="projectsUpdate">
+          <NikuDataBus xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../xsd/nikuxog_project.xsd">
+            <Header action="write" externalSource="NIKU" objectType="project" version="15.3.0.200"/>
+            <Projects>
+              <core:forEach begin="0" end="${prjCounter - 1}" indexVar="c">
+                <Project name="${query2.rows[c].project_name}" openForTimeEntry="false" projectID="${query2.rows[c].project_code}"/>
+              </core:forEach>
+            </Projects>
+          </NikuDataBus>
+        </gel:parse>
+        <core:catch var="v_xog_exception_1">
+          <soap:invoke endpoint="internal" var="runresult">
+            <soap:message>
+              <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xog="http://www.niku.com/xog">
+                <soapenv:Header>
+                  <Auth>
+                    <SessionID>${thisSessionId}</SessionID>
+                  </Auth>
+                </soapenv:Header>
+                <soapenv:Body>
+                  <gel:include select="$projectsUpdate"/>
+                </soapenv:Body>
+              </soapenv:Envelope>
+            </soap:message>
+          </soap:invoke>
+        </core:catch>
+      </core:if>
+	  <!--In order to maintain stability in performance, perform the mass update in several batches if the number of projects to be processed is greater than or equal to 10-->
+      <core:if test="${prjCounter >= 10}">
+        <core:forEach begin="0" end="${maxRoundInt - 1}" indexVar="i">
+          <gel:parse var="projectsUpdate">
+            <NikuDataBus xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../xsd/nikuxog_project.xsd">
+              <Header action="write" externalSource="NIKU" objectType="project" version="15.3.0.200"/>
+              <Projects>
+                <core:forEach begin="${i * 10}" end="${i * 10 + 9}" indexVar="a">
+                  <Project name="${query2.rows[a].project_name}" openForTimeEntry="false" projectID="${query2.rows[a].project_code}"/>
+                </core:forEach>
+              </Projects>
+            </NikuDataBus>
+          </gel:parse>
+          <core:set value="${a}" var="lastProject"/>
+          <!--Last element from the full round traversion-->
+          <core:catch var="v_xog_exception_1">
+            <soap:invoke endpoint="internal" var="runresult">
+              <soap:message>
+                <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xog="http://www.niku.com/xog">
+                  <soapenv:Header>
+                    <Auth>
+                      <SessionID>${thisSessionId}</SessionID>
+                    </Auth>
+                  </soapenv:Header>
+                  <soapenv:Body>
+                    <gel:include select="$projectsUpdate"/>
+                  </soapenv:Body>
+                </soapenv:Envelope>
+              </soap:message>
+            </soap:invoke>
+          </core:catch>
+        </core:forEach>
+        <core:if test="${prjCounter - maxRoundInt * 10 > 0}">
+          <gel:parse var="projectsUpdate">
+            <NikuDataBus xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="../xsd/nikuxog_project.xsd">
+              <Header action="write" externalSource="NIKU" objectType="project" version="15.3.0.200"/>
+              <Projects>
+                <core:forEach begin="${maxRoundInt * 10}" end="${lastProject + remainingProjects}" indexVar="b">
+                  <Project name="${query2.rows[b].project_name}" openForTimeEntry="false" projectID="${query2.rows[b].project_code}"/>
+                </core:forEach>
+              </Projects>
+            </NikuDataBus>
+          </gel:parse>
+          <core:catch var="v_xog_exception_1">
+            <soap:invoke endpoint="internal" var="runresult">
+              <soap:message>
+                <soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xog="http://www.niku.com/xog">
+                  <soapenv:Header>
+                    <Auth>
+                      <SessionID>${thisSessionId}</SessionID>
+                    </Auth>
+                  </soapenv:Header>
+                  <soapenv:Body>
+                    <gel:include select="$projectsUpdate"/>
+                  </soapenv:Body>
+                </soapenv:Envelope>
+              </soap:message>
+            </soap:invoke>
+          </core:catch>
+        </core:if>
+      </core:if>
+    </core:if>
+  </core:if>
+</gel:script>
