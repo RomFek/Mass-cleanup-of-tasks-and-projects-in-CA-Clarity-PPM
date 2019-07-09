@@ -4,7 +4,7 @@ The process of cleaning up tasks and projects consists of two steps.
 
 The steps can be set up in any order. 
 One step is dedicated to closing tasks for time entry based on the parameters that define the minimum age of tasks to be closed. 
-Another step is aimed at closing projects for time entry and the step is parametrized in the same age, where you have to set up the minimu age of projects.
+Another step is aimed at closing projects for time entry and the step is parametrized in the same way, where you have to set up the minimum age of projects.
 
 Both steps have a parameter that allows users to either run the process updating the tasks and projects directly or just analyse tasks and projects that would need to be processed but without actually closing them for time entry.
 
